@@ -28,9 +28,8 @@ POSTGRES_URL = "postgresql://neondb_owner:npg_onVe8gqWs4lm@ep-solitary-bush-addf
 
 WORK_START_HOUR = 10
 WORK_END_HOUR = 18
-SLOT_DURATION_MIN = 30  # half-hour slots
+SLOT_DURATION_MIN = 30
 DAYS_AHEAD = 7
-
 OTHER_SERVICES_LINK = "https://www.morphius.in/services"
 
 try:
@@ -135,6 +134,7 @@ def log_meeting(conn, email, meet_time, link):
 # STREAMLIT APP
 # ================================
 def main():
+    st.set_page_config(page_title="Morphius Scheduler", page_icon="📅")
     st.title("📅 Morphius AI Smart Scheduler")
 
     conn = get_db_connection()
@@ -142,10 +142,13 @@ def main():
         return
     setup_db(conn)
 
-    query_email = st.query_params.get("email", [None])[0]
+    # ✅ Correct query parameter handling (works on Streamlit Cloud)
+    query_params = st.query_params
+    email_param = query_params.get("email", None)
 
-    if query_email:
-        st.subheader(f"Welcome {query_email} 👋")
+    if email_param:
+        user_email = email_param[0] if isinstance(email_param, list) else email_param
+        st.subheader(f"Welcome {user_email} 👋")
         st.write("Please choose an available meeting slot:")
 
         service = get_calendar_service()
@@ -156,7 +159,6 @@ def main():
             st.warning("No available slots this week. Please try later.")
             return
 
-        # Group by date for a clean view
         grouped = {}
         for s in slots:
             d = s.strftime("%A, %d %B %Y")
@@ -168,13 +170,14 @@ def main():
         if st.button("Confirm Booking"):
             start_str = f"{chosen_date} {chosen_time}"
             start_dt = datetime.datetime.strptime(start_str, "%A, %d %B %Y %I:%M %p")
-            meet_link, start = create_meeting(service, query_email, start_dt)
-            log_meeting(conn, query_email, start, meet_link)
+            meet_link, start = create_meeting(service, user_email, start_dt)
+            log_meeting(conn, user_email, start, meet_link)
             st.success(f"✅ Meeting booked!\n\n🕓 {start.strftime('%A, %d %B %Y %I:%M %p')}\n📍 {meet_link}")
         return
 
+    # Default (no email parameter)
     st.info("To book a meeting, open this link sent in your email.")
-    st.caption("For example: https://yourapp.streamlit.app/?email=2gowthami1996@gmail.com")
+    st.caption("Example: https://aiautomationtool-9criyayngv3srzouygnaiy.streamlit.app/?email=client@gmail.com")
 
 if __name__ == "__main__":
     main()
