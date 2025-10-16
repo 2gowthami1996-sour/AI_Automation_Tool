@@ -29,7 +29,7 @@ IMAP_SERVER = "imap.gmail.com"
 IMAP_PORT = 993
 
 # --- Custom Links ---
-CALENDLY_LINK = "https://calendly.com/thridorbit03/30min"
+CALENDLY_LINK = "262640752951-7fd4b17asgaop76e2sn36vn4p08fevu6.apps.googleusercontent.com"
 OTHER_SERVICES_LINK = "https://www.morphius.in/services"
 
 # ===============================
