@@ -1,36 +1,69 @@
 import streamlit as st
 import pandas as pd
-import psycopg2
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # ===============================
 # CONFIGURATION
 # ===============================
-# --- FIX: Corrected the database password ---
-POSTGRES_URL = "postgresql://neondb_owner:npg_onVe8gqWs4lm@ep-solitary-bush-addf9gpm-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
+MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME")
 CLEANED_CSV_PATH = "cleaned_contacts.csv"
-CLEANED_TABLE_NAME = "cleaned_contacts"
+CLEANED_COLLECTION_NAME = "cleaned_contacts"
 
 # ===============================
 # DATABASE & DATA FUNCTIONS
 # ===============================
 def get_db_connection():
-    """Establishes and returns a connection to the PostgreSQL database."""
+    """Establishes and returns a connection to the MongoDB database."""
     try:
-        return psycopg2.connect(POSTGRES_URL)
-    except psycopg2.OperationalError as e:
-        st.error(f"❌ **Database Connection Error:** Could not connect to PostgreSQL. Please ensure the database is running and the connection URL is correct.")
+        client = MongoClient(MONGO_URI)
+        client.admin.command('ismaster')
+        db = client[MONGO_DB_NAME]
+        return client, db
+    except ConnectionFailure as e:
+        st.error(f"❌ **Database Connection Error:** Could not connect to MongoDB.")
         st.error(e)
-        return None
+        return None, None
 
-def fetch_cleaned_contacts(conn):
-    """Fetches all records directly from the 'cleaned_contacts' table."""
+# **MODIFIED:** This function now fetches the new email columns.
+def fetch_cleaned_contacts(db):
+    """Fetches records, selecting and ordering only the desired columns to ensure a clean display."""
     try:
-        df = pd.read_sql(f"SELECT * FROM {CLEANED_TABLE_NAME} ORDER BY id DESC", conn)
-        return df
-    except (Exception, psycopg2.DatabaseError) as error:
-        st.warning(f"⚠️ Could not fetch cleaned contacts. The table might not exist yet. Error: {error}")
+        cursor = db[CLEANED_COLLECTION_NAME].find().sort('_id', -1)
+        df = pd.DataFrame(list(cursor))
+        
+        if df.empty:
+            return pd.DataFrame()
+
+        if '_id' in df.columns:
+            df = df.drop(columns=['_id'])
+        
+        # **FIX:** Update the desired column order to show the new email fields.
+        desired_order = [
+            "name",
+            "work_emails",
+            "personal_emails",
+            "phones",
+            "source",
+            "source_url",
+            "domain",
+            "created_at"
+        ]
+        
+        final_columns = [col for col in desired_order if col in df.columns]
+        
+        return df[final_columns]
+        
+    except Exception as error:
+        st.warning(f"⚠️ Could not fetch cleaned contacts. Collection might be empty. Error: {error}")
         return pd.DataFrame()
+
 
 def save_df_to_csv(df):
     """Saves the DataFrame to a CSV file for download."""
@@ -47,22 +80,22 @@ def main():
     Main function to display the cleaned data and provide a download option.
     """
     st.title("View and Download Cleaned Data")
-    st.markdown("This section displays the unique contacts collected so far. The list updates automatically as new, non-duplicate contacts are added.")
+    st.markdown("This section displays all unique contacts collected from ContactOut and the AI Web Scraper. The list updates automatically.")
 
     if st.button("🔄 Refresh Data"):
         st.rerun()
 
-    conn = get_db_connection()
-    if not conn:
+    client, db = get_db_connection()
+    if not client:
         return
 
-    cleaned_df = fetch_cleaned_contacts(conn)
-    conn.close()
+    cleaned_df = fetch_cleaned_contacts(db)
+    client.close()
 
     if not cleaned_df.empty:
         csv_saved = save_df_to_csv(cleaned_df)
 
-        st.header(f"Unique Contacts ({len(cleaned_df)})")
+        st.header(f"Total Unique Contacts ({len(cleaned_df)})")
         st.dataframe(cleaned_df)
 
         if csv_saved:
@@ -74,8 +107,7 @@ def main():
                     mime="text/csv"
                 )
     else:
-        st.info("ℹ️ No unique contacts found in the database yet. Go to 'Collect Contacts' to add some!")
+        st.info("ℹ️ No unique contacts found yet. Go to 'Collect Contacts' or 'AI Web Scraper' to add some!")
 
 if __name__ == '__main__':
-
     main()
