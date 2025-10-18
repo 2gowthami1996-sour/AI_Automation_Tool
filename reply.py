@@ -1,256 +1,265 @@
-# reply.py
 import streamlit as st
-import imaplib, email, smtplib, datetime, os, re
+import imaplib
+import email
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
-import psycopg2
+import smtplib
+import datetime
+import pandas as pd
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure, OperationFailure
 from openai import OpenAI
-from google.oauth2.credentials import Credentials
-from google.auth.transport.requests import Request
-from google_auth_oauthlib.flow import InstalledAppFlow
-from googleapiclient.discovery import build
+import os
+from dotenv import load_dotenv
 
-# ================================
+# Load environment variables from .env file
+load_dotenv()
+
+# ===============================
 # CONFIGURATION
-# ================================
-SCOPES = ["https://www.googleapis.com/auth/calendar"]
-CREDENTIALS_FILE = "credentials.json"
-TOKEN_FILE = "token.json"
+# ===============================
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME")
+EMAIL = os.getenv("SENDER_EMAIL")
+PASSWORD = os.getenv("SENDER_PASSWORD")
+SMTP_SERVER = os.getenv("SMTP_SERVER")
+SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
+IMAP_SERVER = os.getenv("IMAP_SERVER")
+IMAP_PORT = int(os.getenv("IMAP_PORT", 993))
+# MODIFIED: Renamed variable for clarity
+SCHEDULING_LINK = os.getenv("SCHEDULING_LINK")
+OTHER_SERVICES_LINK = os.getenv("OTHER_SERVICES_LINK")
 
-EMAIL = "thridorbit03@gmail.com"
-PASSWORD = "ouhc mftv huww liru"
-SMTP_SERVER = "smtp.gmail.com"
-SMTP_PORT = 587
-IMAP_SERVER = "imap.gmail.com"
-IMAP_PORT = 993
-
-POSTGRES_URL = "postgresql://neondb_owner:npg_onVe8gqWs4lm@ep-solitary-bush-addf9gpm-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
-
-WORK_START_HOUR = 10
-WORK_END_HOUR = 18
-OTHER_SERVICES_LINK = "https://www.morphius.in/services"
-
-# OpenAI Client
-try:
-    client = OpenAI(api_key=st.secrets["openai"]["api_key"])
-except Exception:
-    client = OpenAI(api_key="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")
-
-# ================================
-# GOOGLE CALENDAR FUNCTIONS
-# ================================
-def get_calendar_service():
-    creds = None
-    if os.path.exists(TOKEN_FILE):
-        creds = Credentials.from_authorized_user_file(TOKEN_FILE, SCOPES)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
-            if not os.path.exists(CREDENTIALS_FILE):
-                st.error(f"Missing {CREDENTIALS_FILE} for Google OAuth.")
-                return None
-            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_FILE, SCOPES)
-            creds = flow.run_local_server(port=0)
-        # Save token
-        with open(TOKEN_FILE, "w") as token:
-            token.write(creds.to_json())
-
-    return build("calendar", "v3", credentials=creds)
-
-def get_next_free_slot(service):
-    now = datetime.datetime.utcnow() + datetime.timedelta(hours=5, minutes=30)
-    end_time = now + datetime.timedelta(days=7)
-    events_result = service.events().list(
-        calendarId="primary",
-        timeMin=now.isoformat() + "Z",
-        timeMax=end_time.isoformat() + "Z",
-        singleEvents=True,
-        orderBy="startTime"
-    ).execute()
-    events = events_result.get("items", [])
-
-    busy_times = []
-    for e in events:
-        start = e["start"].get("dateTime")
-        end = e["end"].get("dateTime")
-        if start and end:
-            busy_times.append((datetime.datetime.fromisoformat(start.replace("Z","+00:00")),
-                               datetime.datetime.fromisoformat(end.replace("Z","+00:00"))))
-    current_time = now
-    while current_time < end_time:
-        if WORK_START_HOUR <= current_time.hour < WORK_END_HOUR and current_time.weekday() < 5:
-            slot_end = current_time + datetime.timedelta(hours=1)
-            if not any(s < slot_end and e > current_time for s,e in busy_times):
-                return current_time, slot_end
-        current_time += datetime.timedelta(minutes=30)
-    return None, None
-
-def create_google_meet_event(service, attendee_email):
-    start, end = get_next_free_slot(service)
-    if not start: return None, None
-    event = {
-        "summary": f"Morphius AI Demo with {attendee_email}",
-        "description": "Discussion about AI solutions.",
-        "start": {"dateTime": start.isoformat(), "timeZone":"Asia/Kolkata"},
-        "end": {"dateTime": end.isoformat(), "timeZone":"Asia/Kolkata"},
-        "attendees":[{"email":attendee_email},{"email":EMAIL}],
-        "conferenceData":{"createRequest":{"requestId":f"meet-{datetime.datetime.now().timestamp()}"}}
-    }
-    created = service.events().insert(calendarId="primary", body=event, conferenceDataVersion=1).execute()
-    return created.get("hangoutLink"), start
-
-# ================================
+# ===============================
 # DATABASE FUNCTIONS
-# ================================
+# ===============================
 def get_db_connection():
     try:
-        return psycopg2.connect(POSTGRES_URL)
+        client = MongoClient(MONGO_URI)
+        client.admin.command('ismaster')
+        db = client[MONGO_DB_NAME]
+        return client, db
+    except ConnectionFailure as e:
+        st.error(f"❌ **Database Connection Error:** {e}")
+        return None, None
+
+def setup_database_indexes(db):
+    """Ensures all required unique indexes exist."""
+    try:
+        db.unsubscribe_list.create_index("email", unique=True)
+    except OperationFailure as e:
+        st.error(f"❌ Failed to set up database indexes: {e}")
+
+def log_event_to_db(db, event_type, email_addr, subject, status=None, interest_level=None, mail_id=None, body=None):
+    try:
+        log_entry = {
+            "timestamp": datetime.datetime.now(datetime.timezone.utc),
+            "event_type": event_type, "recipient_email": email_addr,
+            "subject": subject, "status": status, "interest_level": interest_level,
+            "mail_id": mail_id, "body": body
+        }
+        db.email_logs.insert_one(log_entry)
     except Exception as e:
-        st.error(f"Database connection failed: {e}")
-        return None
+        st.error(f"❌ Failed to log event to database: {e}")
 
-def setup_database_tables(conn):
-    with conn.cursor() as cur:
-        cur.execute("""CREATE TABLE IF NOT EXISTS email_logs (
-                        id SERIAL PRIMARY KEY,
-                        timestamp TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
-                        event_type VARCHAR(50),
-                        recipient_email TEXT,
-                        subject TEXT,
-                        status VARCHAR(50),
-                        body TEXT,
-                        interest_level VARCHAR(50),
-                        mail_id TEXT,
-                        meeting_time TIMESTAMPTZ,
-                        meet_link TEXT
-                    );""")
-    conn.commit()
+# ===============================
+# AI & EMAIL FUNCTIONS
+# ===============================
+def check_interest_manually(email_body):
+    """Performs a simple keyword search to classify interest as a fallback."""
+    body_lower = email_body.lower()
+    positive_keywords = ["interested", "let's connect", "schedule", "love to", "sounds great", "learn more", "curious"]
+    negative_keywords = ["not interested", "unsubscribe", "remove me", "not a good fit", "not right now", "no thank you"]
 
-def log_event_to_db(conn, event_type, email_addr, subject, **kwargs):
-    with conn.cursor() as cur:
-        cols = ["event_type","recipient_email","subject"]
-        vals = [event_type,email_addr,subject]
-        for k,v in kwargs.items():
-            cols.append(k)
-            vals.append(v)
-        placeholders = ",".join(["%s"]*len(vals))
-        sql = f"INSERT INTO email_logs ({','.join(cols)}) VALUES ({placeholders})"
-        cur.execute(sql, tuple(vals))
-    conn.commit()
-
-# ================================
-# EMAIL & AI FUNCTIONS
-# ================================
-def classify_interest_with_keywords(body):
-    body = body.lower()
-    pos = ["interested","let's connect","schedule","love to","sounds great","learn more","curious"]
-    neg = ["not interested","unsubscribe","remove me","not a good fit","not right now","no thank you"]
-    if any(k in body for k in neg): return "negative"
-    if any(k in body for k in pos): return "positive"
+    if any(keyword in body_lower for keyword in negative_keywords): return "negative"
+    if any(keyword in body_lower for keyword in positive_keywords): return "positive"
     return "neutral"
 
-def classify_email_interest(body):
+def check_interest_with_openai(email_body):
+    """Tries to classify interest with OpenAI, falls back to manual check on failure."""
     try:
-        prompt=f"Is this email positive, negative, or neutral?\n\n{body}"
-        res = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[{"role":"user","content":prompt}],
-            max_tokens=5
-        )
-        sentiment=res.choices[0].message.content.strip().lower()
-        if sentiment in ["positive","negative","neutral"]:
-            return sentiment
-        return classify_interest_with_keywords(body)
-    except:
-        return classify_interest_with_keywords(body)
+        prompt = f"Analyze the sentiment of this email reply. Respond with only one word: 'positive', 'negative', or 'neutral'.\n\nEmail: \"{email_body}\"\n\nClassification:"
+        response = client.chat.completions.create(model="gpt-4o", messages=[{"role": "user", "content": prompt}], max_tokens=5, temperature=0)
+        interest = response.choices[0].message.content.strip().lower().replace(".", "")
+        return interest if interest in ["positive", "negative", "neutral"] else "neutral"
+    except Exception as e:
+        st.warning(f"⚠️ OpenAI API failed. Falling back to keyword-based analysis. (Error: {e})")
+        return check_interest_manually(email_body)
 
 def get_unread_emails():
+    """Fetches unread emails from the inbox."""
     try:
         mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
-        mail.login(EMAIL,PASSWORD)
+        mail.login(EMAIL, PASSWORD)
         mail.select("inbox")
-        _,data = mail.search(None,"(UNSEEN)")
-        emails=[]
-        for e_id in data[0].split():
-            _,msg_data = mail.fetch(e_id,"(RFC822)")
+        _, data = mail.search(None, '(UNSEEN)')
+        unread_ids = data[0].split()
+        emails = []
+        for e_id in unread_ids:
+            _, msg_data = mail.fetch(e_id, '(RFC822)')
             msg = email.message_from_bytes(msg_data[0][1])
-            sender = email.utils.parseaddr(msg["From"])[1]
-            subject = email.header.decode_header(msg["Subject"])[0][0]
-            if isinstance(subject, bytes): subject = subject.decode()
-            body=""
+            from_addr = email.utils.parseaddr(msg["From"])[1]
+            subject = msg["Subject"]
+            body = ""
             if msg.is_multipart():
                 for part in msg.walk():
-                    if part.get_content_type()=="text/plain":
-                        body = part.get_payload(decode=True).decode(errors="ignore")
+                    if part.get_content_type() == 'text/plain':
+                        body = part.get_payload(decode=True).decode(errors='ignore')
                         break
             else:
-                body = msg.get_payload(decode=True).decode(errors="ignore")
-            emails.append({"from":sender,"subject":subject,"body":body,"id":e_id.decode()})
+                body = msg.get_payload(decode=True).decode(errors='ignore')
+            emails.append({"from": from_addr, "subject": subject, "body": body, "id": e_id.decode()})
         mail.logout()
         return emails
     except Exception as e:
-        st.error(f"Failed to fetch emails: {e}")
+        st.error(f"❌ Failed to fetch emails: {e}")
         return []
 
-def send_reply(conn,to_email,orig_subject,interest,mail_id):
-    subject=f"Re: {orig_subject}"
-    body=""
-    meet_link, meet_time = None, None
-    if interest=="positive":
-        service=get_calendar_service()
-        if not service:
-            st.error(f"Google Calendar not authorized for {to_email}")
-            return
-        meet_link,meet_time=create_google_meet_event(service,to_email)
-        if not meet_link:
-            st.error(f"No available slot for {to_email}")
-            return
-        body=f"""Hi,\n\nThank you for your positive response!\nMeeting: {meet_time.strftime('%A, %d %B %Y at %I:%M %p IST')}\nJoin: {meet_link}\n\nBest,\nAasrith"""
+def send_reply(db, to_email, original_subject, interest_level, mail_id):
+    """Sends a reply based on the classified interest level."""
+    if interest_level == "positive":
+        subject = f"Re: {original_subject}"
+        # MODIFIED: Using the new generic variable name
+        body = f"Hi,\n\nThank you for your positive response! I'm glad to hear you're interested.\n\nYou can book a meeting with me directly here: {SCHEDULING_LINK}\n\nI look forward to speaking with you.\n\nBest regards,\nAasrith"
+    elif interest_level in ["negative", "neutral"]:
+        subject = f"Re: {original_subject}"
+        body = f"Hi,\n\nThank you for getting back to me. I understand.\n\nIn case you're interested, we also offer other services which you can explore here: {OTHER_SERVICES_LINK}\n\nBest regards,\nAasrith"
     else:
-        body=f"Hi,\n\nThank you for your response. Explore more: {OTHER_SERVICES_LINK}\n\nBest,\nAasrith"
+        return
 
-    msg = MIMEMultipart()
-    msg["From"],msg["To"],msg["Subject"]=EMAIL,to_email,subject
-    msg.attach(MIMEText(body,"plain"))
+    msg = MIMEMultipart(); msg["From"], msg["To"], msg["Subject"] = EMAIL, to_email, subject; msg.attach(MIMEText(body, "plain"))
     try:
-        with smtplib.SMTP(SMTP_SERVER,SMTP_PORT) as server:
-            server.starttls()
-            server.login(EMAIL,PASSWORD)
-            server.sendmail(EMAIL,to_email,msg.as_string())
-        log_event_to_db(conn,f"replied_{interest}",to_email,subject,status="success",
-                        interest_level=interest,mail_id=mail_id,body=body,
-                        meeting_time=meet_time,meet_link=meet_link)
-        st.success(f"Sent '{interest}' reply to {to_email}")
+        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+            server.starttls(); server.login(EMAIL, PASSWORD)
+            server.sendmail(EMAIL, to_email, msg.as_string())
+        st.success(f"✅ Sent '{interest_level}' reply to {to_email}")
+        log_event_to_db(db, f"replied_{interest_level}", to_email, subject, "success", interest_level, mail_id, body)
+        mark_as_read(mail_id)
     except Exception as e:
-        st.error(f"Failed to send reply: {e}")
-        log_event_to_db(conn,f"replied_{interest}",to_email,subject,status="failed",
-                        interest_level=interest,mail_id=mail_id)
+        st.error(f"❌ Failed to send reply to {to_email}: {e}")
 
-# ================================
-# MAIN APP
-# ================================
+def mark_as_read(mail_id):
+    try:
+        mail = imaplib.IMAP4_SSL(IMAP_SERVER); mail.login(EMAIL, PASSWORD); mail.select("inbox")
+        mail.store(mail_id.encode(), '+FLAGS', '\\Seen'); mail.logout()
+    except Exception as e:
+        st.warning(f"Could not mark email {mail_id} as read: {e}")
+
+# ===============================
+# AUTOMATED TASK PROCESSING
+# ===============================
+def process_follow_ups(db):
+    """Sends a follow-up to contacts who haven't replied."""
+    two_minutes_ago = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=2)
+    pipeline = [
+        {'$group': {
+            '_id': '$recipient_email',
+            'events': {'$push': '$event_type'},
+            'first_sent': {'$min': '$timestamp'}
+        }},
+        {'$match': {
+            'events': {'$in': ['sent']},
+            'events': {'$nin': ['follow_up_sent', 'replied_positive', 'replied_negative', 'replied_neutral']},
+            'first_sent': {'$lt': two_minutes_ago}
+        }}
+    ]
+    
+    candidates = list(db.email_logs.aggregate(pipeline))
+    if not candidates:
+        return 0
+
+    st.info("--- Sending Follow-Up Emails ---")
+    unsubscribed_docs = db.unsubscribe_list.find({}, {'email': 1})
+    unsubscribed_emails = {doc['email'] for doc in unsubscribed_docs}
+    actions_taken = 0
+
+    for candidate in candidates:
+        email_to_follow_up = candidate['_id']
+        if email_to_follow_up in unsubscribed_emails: continue
+
+        subject, body = "Quick Follow-Up", f"Hi,\n\nJust wanted to quickly follow up on my previous email. If it's not the right time, no worries.\n\nWe also have other services you might find interesting: {OTHER_SERVICES_LINK}\n\nBest regards,\nAasrith"
+        msg = MIMEMultipart(); msg["From"], msg["To"], msg["Subject"] = EMAIL, email_to_follow_up, subject; msg.attach(MIMEText(body, "plain"))
+        try:
+            with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
+                server.starttls(); server.login(EMAIL, PASSWORD)
+                server.sendmail(EMAIL, email_to_follow_up, msg.as_string())
+            st.success(f"✅ Follow-up sent to {email_to_follow_up}")
+            log_event_to_db(db, "follow_up_sent", email_to_follow_up, subject, "success", body=body)
+            actions_taken += 1
+        except Exception as e:
+            st.error(f"❌ Failed to send follow-up to {email_to_follow_up}: {e}")
+    return actions_taken
+
+def process_unsubscribes(db):
+    """Adds contacts to the unsubscribe list if they haven't replied after 5 emails."""
+    pipeline = [
+        {'$match': {'event_type': {'$in': ['sent', 'follow_up_sent']}}},
+        {'$group': {'_id': '$recipient_email', 'count': {'$sum': 1}}},
+        {'$match': {'count': {'$gte': 5}}}
+    ]
+    sent_counts = list(db.email_logs.aggregate(pipeline))
+    
+    replied_list = db.email_logs.distinct("recipient_email", {"event_type": {"$regex": "^replied"}})
+    unsubscribed_list = db.unsubscribe_list.distinct("email")
+    
+    if not sent_counts: return 0
+
+    st.info("--- Updating Unsubscribe List ---")
+    actions_taken = 0
+    for doc in sent_counts:
+        email_addr = doc['_id']
+        if email_addr not in replied_list and email_addr not in unsubscribed_list:
+            try:
+                db.unsubscribe_list.update_one(
+                    {'email': email_addr},
+                    {'$setOnInsert': {
+                        'email': email_addr, 
+                        'reason': 'No reply after 5 emails', 
+                        'created_at': datetime.datetime.now(datetime.timezone.utc)
+                    }},
+                    upsert=True
+                )
+                st.warning(f"🚫 Added {email_addr} to unsubscribe list.")
+                actions_taken += 1
+            except Exception as e:
+                st.error(f"Failed to add {email_addr} to unsubscribe list: {e}")
+    return actions_taken
+
+# ===============================
+# MAIN STREAMLIT APP
+# ===============================
 def main():
-    st.title("📧 Automated Reply Handler + Smart Scheduler")
-    conn = get_db_connection()
-    if not conn: return
-    setup_database_tables(conn)
+    st.title("Automated Reply Handler")
+    client, db = get_db_connection()
+    if not client: return
+    setup_database_indexes(db)
 
     if st.button("Check Emails & Run Automations"):
-        with st.spinner("Checking emails..."):
-            emails = get_unread_emails()
-            if not emails:
-                st.info("No unread emails found")
-                return
-            st.write(f"Found {len(emails)} new email(s)")
-            for mail in emails:
-                log_event_to_db(conn,"received",mail["from"],mail["subject"],body=mail["body"],mail_id=mail["id"])
-                interest=classify_email_interest(mail["body"])
-                st.write(f"→ From: {mail['from']} | Subject: {mail['subject']} | Detected Interest: {interest.capitalize()}")
-                send_reply(conn,mail["from"],mail["subject"],interest,mail["id"])
-            st.success("Finished processing all emails")
-    conn.close()
+        with st.spinner("Processing..."):
+            st.info("--- Checking for new replies ---")
+            unread_emails = get_unread_emails()
+            
+            if unread_emails:
+                st.write(f"Found {len(unread_emails)} new email(s).")
+                for mail in unread_emails:
+                    st.write(f"Processing reply from: {mail['from']}")
+                    log_event_to_db(db, "received", mail["from"], mail["subject"], mail_id=mail["id"], body=mail["body"])
+                    interest = check_interest_with_openai(mail["body"])
+                    st.write(f"-> Interest level: **{interest}**")
+                    send_reply(db, mail["from"], mail["subject"], interest, mail["id"])
+                st.success("✅ Finished processing new replies.")
+            else:
+                st.write("No new replies to process.")
+                follow_ups_sent = process_follow_ups(db)
+                unsubscribes_processed = process_unsubscribes(db)
+                
+                if follow_ups_sent == 0 and unsubscribes_processed == 0:
+                    st.info("No pending automated tasks found.")
+                else:
+                    st.success("✅ Automated tasks complete.")
 
-if __name__=="__main__":
+    client.close()
+
+if __name__ == "__main__":
     main()
