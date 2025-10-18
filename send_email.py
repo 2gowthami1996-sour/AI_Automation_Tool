@@ -1,47 +1,95 @@
 import streamlit as st
 import pandas as pd
-import psycopg2
+from pymongo import MongoClient
+from pymongo.errors import ConnectionFailure
 from io import StringIO
 from openai import OpenAI
 import os
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # ===============================
 # CONFIGURATION
 # ===============================
-POSTGRES_URL = "postgresql://neondb_owner:npg_onVe8gqWs4lm@ep-solitary-bush-addf9gpm-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
-
-try:
-    # Recommended for deployment: set secrets in Streamlit Cloud
-    client = OpenAI(api_key=st.secrets["openai"]["api_key"])
-except Exception:
-    # For local development
-    client = OpenAI(api_key="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")
+MONGO_URI = os.getenv("MONGO_URI")
+MONGO_DB_NAME = os.getenv("MONGO_DB_NAME")
+client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
 # ===============================
-# HELPER FUNCTIONS
+# HELPER & CALLBACK FUNCTIONS
 # ===============================
 def get_db_connection():
     try:
-        return psycopg2.connect(POSTGRES_URL)
-    except psycopg2.OperationalError as e:
-        st.error(f"❌ *Database Connection Error:* {e}")
-        return None
+        client = MongoClient(MONGO_URI)
+        client.admin.command('ismaster')
+        db = client[MONGO_DB_NAME]
+        return client, db
+    except ConnectionFailure as e:
+        st.error(f"❌ Database Connection Error: {e}")
+        return None, None
 
-def fetch_cleaned_contacts(conn):
+def fetch_cleaned_contacts(db):
     try:
-        return pd.read_sql("SELECT * FROM cleaned_contacts ORDER BY id DESC", conn)
-    except (Exception, psycopg2.DatabaseError):
-        st.warning("⚠ Could not fetch contacts. The 'cleaned_contacts' table might not exist yet.")
+        cursor = db.cleaned_contacts.find().sort('_id', -1)
+        df = pd.DataFrame(list(cursor))
+        # Keep the original mongo ID for potential reference, but don't show it
+        if '_id' in df.columns:
+            df.rename(columns={'_id': 'mongo_id'}, inplace=True)
+        return df
+    except Exception as e:
+        st.warning(f"⚠ Could not fetch contacts. The 'cleaned_contacts' collection might not exist yet. Error: {e}")
         return pd.DataFrame()
 
+# --- CALLBACKS FOR STATE MANAGEMENT ---
+def update_subject(index):
+    """Callback to update the subject in the session state."""
+    widget_key = f"subject_{index}"
+    st.session_state.edited_emails[index]['subject'] = st.session_state[widget_key]
+
+def update_body(index):
+    """Callback to update the body in the session state."""
+    widget_key = f"body_{index}"
+    st.session_state.edited_emails[index]['body'] = st.session_state[widget_key]
+
 # ===============================
-# EMAIL GENERATION LOGIC (WITH FALLBACK)
+# AI-POWERED LOGIC
 # ===============================
+def decode_prompt_to_domain(prompt):
+    """Uses OpenAI to analyze a prompt and extract a business domain keyword."""
+    try:
+        system_message = """
+        You are an expert business analyst. Your task is to analyze the user's prompt and identify the core business domain or industry sector.
+        Respond with ONLY a single, lowercase keyword for the domain.
+        Examples:
+        - Prompt: "Top 10 colleges in Hyderabad" -> edtech
+        - Prompt: "E-commerce startups" -> commerce
+        - Prompt: "Hospitals in Delhi" -> health
+        - Prompt: "Investment banks" -> finance
+        - Prompt: "Car companies" -> automotive
+        If you cannot determine a clear domain, respond with 'general'.
+        """
+        response = client.chat.completions.create(
+            model="gpt-4o",
+            messages=[
+                {"role": "system", "content": system_message},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=10,
+            temperature=0.1,
+        )
+        domain = response.choices[0].message.content.strip().lower()
+        return domain
+    except Exception as e:
+        st.error(f"Could not analyze prompt due to an API error: {e}")
+        return None
+
 def get_fallback_template(domain, name):
     """Selects a pre-written template based on the contact's domain."""
     greeting = f"Hi {name}," if pd.notna(name) and name.strip() else "Dear Sir/Madam,"
     signature = "\n\nBest regards,\nAasrith\nEmployee, Morphius AI\nhttps://www.morphius.in/"
-    
+
     domain_lower = str(domain).lower()
 
     if "edtech" in domain_lower or "education" in domain_lower:
@@ -61,117 +109,164 @@ def generate_personalized_email_body(contact_details):
     domain = contact_details.get('domain', 'their industry')
     linkedin = contact_details.get('linkedin_url', '')
     greeting = f"Hi {name}," if pd.notna(name) and name.strip() else "Dear Sir/Madam,"
+    signature = "\n\nBest regards,\nAasrith\nEmployee, Morphius AI\nhttps://www.morphius.in/"
 
     try:
-        # We still try to use the AI first.
         prompt = f"""
-        Write a professional and concise outreach email. My name is Aasrith from Morphius AI (morphius.in).
-        The email is for {name or 'a professional'} in the {domain} sector. Their LinkedIn is {linkedin}.
-        Start with "{greeting}", briefly introduce Morphius AI's relevance to their industry, express interest in connecting, and keep it under 150 words.
-        End with: "Best regards,\nAasrith\nEmployee, Morphius AI\nhttps://www.morphius.in/"
+        Write a professional and concise outreach email body.
+        The target is {name or 'a professional'} in the {domain} sector. LinkedIn: {linkedin}.
+        My name is Aasrith from Morphius AI.
+
+        Your entire response should be ONLY the email content, following these rules precisely:
+        1. Start the email body directly with the greeting: "{greeting}"
+        2. After the greeting, add the main message. Briefly introduce Morphius AI's relevance to their industry and express interest in connecting. Keep this main part under 120 words.
+        3. End the email body with the exact closing: "{signature}"
+
+        Do NOT include a "Subject:" line or any other text outside of the email body itself. Your output should be ready to be pasted directly into an email.
         """
         response = client.chat.completions.create(
-            model="gpt-3.5-turbo",
+            model="gpt-4o",
             messages=[
-                {"role": "system", "content": "You are a business development expert crafting personalized outreach emails."},
+                {"role": "system", "content": "You are a business development assistant. Your only job is to write the full text for an email body as instructed, without any extra text or formatting."},
                 {"role": "user", "content": prompt}
             ],
             max_tokens=300, temperature=0.75,
         )
-        # If this line is reached, the API call was successful.
         return response.choices[0].message.content.strip()
 
     except Exception as e:
-        # --- CORRECTED FALLBACK LOGIC ---
-        # If the API fails for ANY reason (401 key error, server down, etc.),
-        # this block will run instead of showing an error.
-        st.warning(f"⚠️ OpenAI API failed. Using a pre-written template instead. (Error: {e})")
+        st.warning(f"⚠ OpenAI API failed. Using a pre-written template instead. (Error: {e})")
         return get_fallback_template(domain, name)
 
 # ===============================
-# MAIN STREAMLIT APP (No changes below this line)
+# MAIN STREAMLIT APP
 # ===============================
 def main():
     st.title("Generate & Edit Email Drafts")
 
     if 'edited_emails' not in st.session_state:
         st.session_state.edited_emails = []
+    if 'filter_domain' not in st.session_state:
+        st.session_state.filter_domain = None
 
-    conn = get_db_connection()
-    if not conn:
+    client, db = get_db_connection()
+    if not client:
         return
 
-    contacts_df = fetch_cleaned_contacts(conn)
-    conn.close()
+    st.header("Step 1: Find Contacts with AI")
+    st.markdown("Describe the contacts you're looking for to automatically filter the list by industry.")
+    
+    prompt = st.text_input("Enter your prompt (e.g., 'top 10 colleges in Hyderabad' or 'e-commerce startups')", key="prompt_input")
+    
+    col1, col2 = st.columns(2)
+    with col1:
+        if st.button("🔍 Filter from Prompt", use_container_width=True):
+            if prompt:
+                with st.spinner("Analyzing prompt and filtering..."):
+                    domain = decode_prompt_to_domain(prompt)
+                    if domain and domain != 'general':
+                        st.session_state.filter_domain = domain
+                        st.success(f"Successfully filtered for domain: *{domain}*")
+                    else:
+                        st.session_state.filter_domain = None
+                        st.info("Prompt was too general or could not be analyzed. Showing all contacts.")
+                st.rerun()
+            else:
+                st.warning("Please enter a prompt first.")
+    with col2:
+        if st.button("🔄 Show All Contacts", use_container_width=True):
+            st.session_state.filter_domain = None
+            st.rerun()
+
+    st.header("Step 2: Select Contacts & Generate Drafts")
+    
+    contacts_df = fetch_cleaned_contacts(db)
+    client.close()
 
     if contacts_df.empty:
-        st.info("No cleaned contacts found. Go to 'Show Cleaned Data' to process contacts first.")
+        st.info("No cleaned contacts found. Go to 'Collect Contacts' to add some.")
         return
 
-    st.header("Step 1: Select Contacts & Generate Drafts")
+    if st.session_state.filter_domain:
+        display_df = contacts_df[contacts_df['domain'].str.contains(st.session_state.filter_domain, case=False, na=False)].copy()
+        st.info(f"Showing {len(display_df)} of {len(contacts_df)} contacts matching the domain '{st.session_state.filter_domain}'")
+    else:
+        display_df = contacts_df.copy()
 
-    if 'contacts_df' not in st.session_state:
-        st.session_state.contacts_df = contacts_df.copy()
-        if 'Select' not in st.session_state.contacts_df.columns:
-            st.session_state.contacts_df.insert(0, "Select", False)
+    if 'Select' not in display_df.columns:
+        display_df.insert(0, "Select", False)
 
-    col1, col2 = st.columns([1, 1])
-    with col1:
-        if st.button("✅ Select All", use_container_width=True):
-            st.session_state.contacts_df["Select"] = True
-            st.rerun()
-    with col2:
-        if st.button("❌ Deselect All", use_container_width=True):
-            st.session_state.contacts_df["Select"] = False
-            st.rerun()
+    select_all = st.checkbox("Select All Contacts")
+    if select_all:
+        display_df['Select'] = True
+
+    editor_key = f"data_editor_{st.session_state.filter_domain or 'all'}"
+    disabled_cols = list(display_df.columns.drop("Select"))
 
     edited_df = st.data_editor(
-        st.session_state.contacts_df,
-        hide_index=True,
-        disabled=st.session_state.contacts_df.columns.drop("Select")
+        display_df, hide_index=True, disabled=disabled_cols, key=editor_key
     )
-
-    st.session_state.contacts_df = edited_df
-    selected_rows = st.session_state.contacts_df[st.session_state.contacts_df['Select']]
+    
+    selected_rows = edited_df[edited_df['Select']]
 
     if st.button(f"Generate Drafts for {len(selected_rows)} Selected Contacts", disabled=selected_rows.empty):
         st.session_state.edited_emails = []
         with st.spinner("Generating drafts..."):
-            for _, row in selected_rows.iterrows():
-                to_email = row.get('work_emails') or row.get('personal_emails')
-                if not to_email or pd.isna(to_email):
+            for i, row in selected_rows.iterrows():
+                
+                # --- CORRECTED & ROBUST email selection logic ---
+                to_email = None
+                
+                # Safely get the work email value
+                work_email_val = row.get('work_emails')
+                # Check if it's a valid, non-empty string
+                if isinstance(work_email_val, str) and work_email_val.strip():
+                    to_email = work_email_val.split(',')[0].strip() # Take the first email if multiple exist
+
+                # If no valid work email was found, try the personal email
+                if not to_email:
+                    personal_email_val = row.get('personal_emails')
+                    if isinstance(personal_email_val, str) and personal_email_val.strip():
+                        to_email = personal_email_val.split(',')[0].strip()
+
+                # If still no email after checking both, skip this contact and warn the user
+                if not to_email:
+                    st.warning(f"⚠️ Skipped '{row.get('name', 'Unknown Contact')}' because no valid email was found.")
                     continue
+                # --- END OF CORRECTION ---
 
                 body = generate_personalized_email_body(row)
                 st.session_state.edited_emails.append({
-                    "id": row['id'], "name": row['name'], "to_email": to_email,
+                    "id": i, "name": row['name'], "to_email": to_email,
                     "subject": "Connecting from Morphius AI", "body": body,
                     "contact_details": row.to_dict()
                 })
 
     if st.session_state.edited_emails:
-        st.header("Step 2: Review and Edit Drafts")
+        st.header("Step 3: Review and Edit Drafts")
         st.info("Edit the drafts directly, use 'Regenerate Body' for a new AI version, or 'Clear & Write Manually' to start from scratch.")
-
-        if st.button("👁 View All Drafts Together", use_container_width=True):
-            st.subheader("All Generated Drafts")
-            for email_draft in st.session_state.edited_emails:
-                st.markdown(f"### ✉ {email_draft['name']} (<{email_draft['to_email']}>)")
-                st.markdown(f"*Subject:* {email_draft['subject']}")
-                st.text_area( "Body", value=email_draft['body'], height=250, key=f"viewall_body_{email_draft['id']}",)
-                st.markdown("---")
 
         for i, email_draft in enumerate(st.session_state.edited_emails):
             with st.expander(f"Draft for: {email_draft['name']} <{email_draft['to_email']}>", expanded=True):
-                st.session_state.edited_emails[i]['subject'] = st.text_input(
-                    "Subject", value=email_draft['subject'], key=f"subject_{i}"
+                
+                st.text_input(
+                    "Subject",
+                    value=email_draft['subject'],
+                    key=f"subject_{i}",
+                    on_change=update_subject,
+                    args=(i,)
                 )
-                st.session_state.edited_emails[i]['body'] = st.text_area(
-                    "Body", value=email_draft['body'], height=250, key=f"body_{i}"
+                st.text_area(
+                    "Body",
+                    value=email_draft['body'],
+                    height=250,
+                    key=f"body_{i}",
+                    on_change=update_body,
+                    args=(i,)
                 )
 
-                col1, col2 = st.columns(2)
-                with col1:
+                b_col1, b_col2 = st.columns(2)
+                with b_col1:
                     if st.button("🔄 Regenerate Body", key=f"regen_{i}", use_container_width=True):
                         with st.spinner("Asking AI for a new version..."):
                             new_body = generate_personalized_email_body(email_draft['contact_details'])
@@ -179,9 +274,9 @@ def main():
                             st.toast(f"Generated a new draft for {email_draft['name']}!")
                         st.rerun()
 
-                with col2:
+                with b_col2:
                     if st.button("✍ Clear & Write Manually", key=f"clear_{i}", use_container_width=True):
-                        manual_template = f"Hi {email_draft.get('name', '')},\n\n\n\nBest regards,\nAasrith\nFounder, Morphius AI\nhttps://www.morphius.in/"
+                        manual_template = f"Hi {email_draft.get('name', '')},\n\n\n\nBest regards,\nAasrith\nEmployee, Morphius AI\nhttps://www.morphius.in/"
                         st.session_state.edited_emails[i]['body'] = manual_template
                         st.toast(f"Cleared draft for {email_draft['name']}. You can now write manually.")
                         st.rerun()
@@ -200,4 +295,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
