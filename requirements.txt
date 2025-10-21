@@ -9,3 +9,5 @@ python-dotenv
 requests
 streamlit
 google_search
+datetime
+yagmail
