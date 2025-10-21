@@ -105,13 +105,17 @@ def check_interest_with_openai(email_body):
         return check_interest_manually(email_body)
 
 def get_unread_emails():
-    """Fetches unread emails from the inbox."""
+    """Fetches unread emails from the inbox and shows debug info."""
     try:
         mail = imaplib.IMAP4_SSL(IMAP_SERVER, IMAP_PORT)
         mail.login(EMAIL, PASSWORD)
-        mail.select("inbox")
+        mail.select("inbox")  # Make sure your folder name matches
         _, data = mail.search(None, '(UNSEEN)')
         unread_ids = data[0].split()
+        
+        st.write("🔹 Raw IMAP search data:", data)
+        st.write(f"🔹 Unread email IDs: {unread_ids}")
+
         emails = []
         for e_id in unread_ids:
             _, msg_data = mail.fetch(e_id, '(RFC822)')
@@ -127,12 +131,18 @@ def get_unread_emails():
             else:
                 body = msg.get_payload(decode=True).decode(errors='ignore')
             emails.append({"from": from_addr, "subject": subject, "body": body, "id": e_id.decode()})
+        
         mail.logout()
+        
+        if not emails:
+            st.info("✅ No new unread emails found.")
+        else:
+            st.write(f"✅ Fetched {len(emails)} unread email(s).")
+        
         return emails
     except Exception as e:
         st.error(f"❌ Failed to fetch emails: {e}")
         return []
-
 def send_reply(db, to_email, original_subject, interest_level, mail_id):
     """Sends a reply based on the classified interest level."""
     if interest_level == "positive":
@@ -163,16 +173,21 @@ def mark_as_read(mail_id):
         st.warning(f"Could not mark email {mail_id} as read: {e}")
 
 # ===============================
-# AUTOMATED TASK PROCESSING
+# FOLLOW-UP PROCESS (1-min interval for testing)
 # ===============================
 def process_follow_ups(db):
-    """Sends a follow-up to contacts who haven't replied to the last outreach email."""
-    waiting_period = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=2)
+    """
+    Sends a follow-up to contacts who haven't replied to the last outreach email.
+    For testing, follow-up triggers 1 minute after the last email.
+    """
+    # 1 minute waiting period for testing
+    waiting_period = datetime.datetime.now(datetime.timezone.utc) - datetime.timedelta(minutes=1)
     replied_emails = db.email_logs.distinct("recipient_email", {"event_type": {"$regex": "^replied"}})
 
+    # Fetch candidates who got outreach/follow-ups but haven't replied
     pipeline = [
-        {'$match': {'event_type': {'$in': ['initial_outreach', 'follow_up_sent']}}},
-        {'$sort': {'timestamp': 1}},
+        {'$match': {'event_type': {'$in': ['initial_outreach', 'follow_up_sent']}}}, 
+        {'$sort': {'timestamp': 1}}, 
         {'$group': {
             '_id': '$recipient_email',
             'last_contact_time': {'$last': '$timestamp'},
@@ -181,13 +196,12 @@ def process_follow_ups(db):
         {'$match': {
             '_id': {'$nin': replied_emails},
             'last_contact_time': {'$lt': waiting_period},
-            'outreach_count': {'$lt': 3}
+            'outreach_count': {'$lt': 3}  # Max 3 attempts
         }}
     ]
-    
+
     candidates = list(db.email_logs.aggregate(pipeline))
-    if not candidates:
-        return 0
+    st.write(f"🔹 Candidates for follow-up: {len(candidates)}")
 
     unsubscribed_docs = db.unsubscribe_list.find({}, {'email': 1})
     unsubscribed_emails = {doc['email'] for doc in unsubscribed_docs}
@@ -195,19 +209,35 @@ def process_follow_ups(db):
 
     for candidate in candidates:
         email_to_follow_up = candidate['_id']
-        if email_to_follow_up in unsubscribed_emails: continue
+        if email_to_follow_up in unsubscribed_emails:
+            st.write(f"⚠️ Skipping {email_to_follow_up} (unsubscribed)")
+            continue
 
-        subject, body = "Quick Follow-Up", f"Hi,\n\nJust wanted to quickly follow up on my previous email. If it's not the right time, no worries.\n\nWe also have other services you might find interesting: {OTHER_SERVICES_LINK}\n\nBest regards,\nAasrith"
-        msg = MIMEMultipart(); msg["From"], msg["To"], msg["Subject"] = EMAIL, email_to_follow_up, subject; msg.attach(MIMEText(body, "plain"))
+        # Follow-up content
+        subject = "Quick Follow-Up"
+        body = (
+            f"Hi,\n\nJust wanted to quickly follow up on my previous email. "
+            f"If it's not the right time, no worries.\n\n"
+            f"We also have other services you might find interesting: {OTHER_SERVICES_LINK}\n\n"
+            f"Best regards,\nAasrith"
+        )
+        msg = MIMEMultipart()
+        msg["From"], msg["To"], msg["Subject"] = EMAIL, email_to_follow_up, subject
+        msg.attach(MIMEText(body, "plain"))
+
         try:
             with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-                server.starttls(); server.login(EMAIL, PASSWORD)
+                server.starttls()
+                server.login(EMAIL, PASSWORD)
                 server.sendmail(EMAIL, email_to_follow_up, msg.as_string())
             st.success(f"✅ Follow-up sent to {email_to_follow_up}")
             log_event_to_db(db, "follow_up_sent", email_to_follow_up, subject, "success", body=body)
             actions_taken += 1
         except Exception as e:
             st.error(f"❌ Failed to send follow-up to {email_to_follow_up}: {e}")
+
+    if actions_taken == 0:
+        st.info("No follow-ups needed at this time.")
     return actions_taken
 
 def process_unsubscribes(db):
