@@ -72,7 +72,7 @@ It integrates AI models, database storage, and email sending modules into one st
 | 📊 UI Dashboard | Streamlit |
 | 🗃️ Database | MongoDB |
 | 📬 Email Sending | SMTP |
-| 🧰 Utilities | Pandas, BeautifulSoup, Requests, SerpAI |
+| 🧰 Utilities | Pandas, BeautifulSoup, Requests, SerpAPI |
 | 🔐 Security | .env secrets, tokenized access |
 
 ---
