@@ -2,8 +2,10 @@
 # 🧠 AI Automation Tool  
 ### Internal Client Acquisition & Smart Email Outreach  
 
-**Version:** 1.0  #it indicates the current release or maturity level of your project.
+**Version:** 1.0      #it indicates the current release or maturity level of your project.
+
 **Owner:** Growth Engineering Team  
+
 **Status:** Active Development  
 
 ---
