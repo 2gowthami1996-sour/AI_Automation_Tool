@@ -1,328 +1,260 @@
-# reply.py
 import streamlit as st
 import pandas as pd
-from pymongo import MongoClient
-from pymongo.errors import ConnectionFailure, OperationFailure
 import os
-from dotenv import load_dotenv
-import datetime
+from datetime import datetime
+from pymongo import MongoClient
 from openai import OpenAI
-import smtplib
-from email.mime.text import MIMEText
-from email.mime.multipart import MIMEMultipart
+import yagmail
+from dotenv import load_dotenv
 
-# ===============================
+# ======================================
 # CONFIGURATION
-# ===============================
+# ======================================
 load_dotenv()
 
 MONGO_URI = os.getenv("MONGO_URI")
-MONGO_DB_NAME = os.getenv("MONGO_DB_NAME")
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
-SENDER_EMAIL = os.getenv("SENDER_EMAIL")
-SMTP_SERVER = os.getenv("SMTP_SERVER")
-SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-SENDER_PASSWORD = os.getenv("SENDER_PASSWORD")
-
-EMAIL_LOGS_COLLECTION = "email_logs"
+DB_NAME = "ai_email_automation"
 CLEANED_CONTACTS_COLLECTION = "cleaned_contacts"
-UNSUBSCRIBE_COLLECTION = "unsubscribe_list"
+EMAIL_LOGS_COLLECTION = "email_logs"
 
-FOLLOW_UP_GRACE_PERIOD_MINUTES = 1
-MAX_FOLLOW_UPS_BEFORE_UNSUBSCRIBE = 4
-
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+SMTP_USER = os.getenv("SMTP_USER")
+SMTP_PASS = os.getenv("SMTP_PASS")
 SCHEDULING_LINK = "https://calendar.google.com/calendar/u/0/appointments/schedules/AcZssZ1NrFLLqMavHAp5kvtxWiscTQBiWZB1wpJmhwp9JkSSudjC9DWY8b0HXZntjh4rEtHZvLaxLAdR"
+
+FOLLOW_UP_GRACE_PERIOD_MINUTES = 60 * 24  # 24 hours
 
 client_ai = OpenAI(api_key=OPENAI_API_KEY)
 
-# ===============================
-# DATABASE FUNCTIONS
-# ===============================
-def get_db_connection():
-    try:
-        client = MongoClient(MONGO_URI)
-        client.admin.command("ping")
-        db = client[MONGO_DB_NAME]
-        return client, db
-    except ConnectionFailure as e:
-        st.error("❌ Database connection failed.")
-        st.error(e)
-        return None, None
+
+# ======================================
+# HELPER FUNCTIONS
+# ======================================
+def connect_mongo():
+    return MongoClient(MONGO_URI)[DB_NAME]
 
 
-def setup_db_indexes(db):
-    try:
-        db[UNSUBSCRIBE_COLLECTION].create_index("email", unique=True)
-    except OperationFailure:
-        pass
-
-
-def log_event_to_db(db, event_type, recipient_email, subject, body, status, **kwargs):
-    entry = {
-        "timestamp": datetime.datetime.now(datetime.timezone.utc),
-        "event_type": event_type,
-        "recipient_email": recipient_email,
-        "subject": subject,
-        "body": body,
-        "status": status,
-        **kwargs,
-    }
-    db[EMAIL_LOGS_COLLECTION].insert_one(entry)
-
-
-def is_unsubscribed(db, email):
-    return db[UNSUBSCRIBE_COLLECTION].find_one({"email": email}) is not None
-
-
-def add_to_unsubscribe_list(db, email, reason):
-    db[UNSUBSCRIBE_COLLECTION].update_one(
-        {"email": email},
-        {"$setOnInsert": {
-            "email": email,
-            "reason": reason,
-            "unsubscribed_at": datetime.datetime.now(datetime.timezone.utc),
-        }},
-        upsert=True
+def log_event_to_db(db, event_type, recipient_email, subject, body, status):
+    db[EMAIL_LOGS_COLLECTION].insert_one(
+        {
+            "timestamp": datetime.now(),
+            "event_type": event_type,
+            "recipient_email": recipient_email,
+            "subject": subject,
+            "body": body,
+            "status": status,
+        }
     )
 
 
-# ===============================
-# EMAIL FUNCTIONS
-# ===============================
-def add_footer(email_body):
+def send_email_smtp_direct(to_email, subject, body):
+    yag = yagmail.SMTP(SMTP_USER, SMTP_PASS)
+    yag.send(to=to_email, subject=subject, contents=body)
+
+
+def add_footer(body):
     footer = f"""
     
 ---
 💡 *Automated message from Morphius AI.*
-📅 Schedule a meeting: {SCHEDULING_LINK}  
-🚫 To unsubscribe, reply with "unsubscribe".
+📅 Book a meeting: [{SCHEDULING_LINK}]({SCHEDULING_LINK})  
+🚫 To unsubscribe: reply with "unsubscribe"
 """
-    return email_body.strip() + footer
+    return body + footer
 
 
-def send_email_smtp_direct(to_email, subject, body):
-    if not all([SMTP_SERVER, SMTP_PORT, SENDER_EMAIL, SENDER_PASSWORD]):
-        st.error("⚠️ SMTP credentials missing in .env file.")
-        return False
-    try:
-        msg = MIMEMultipart()
-        msg["From"] = SENDER_EMAIL
-        msg["To"] = to_email
-        msg["Subject"] = subject
-        msg.attach(MIMEText(add_footer(body), "plain"))
-
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT) as server:
-            server.starttls()
-            server.login(SENDER_EMAIL, SENDER_PASSWORD)
-            server.sendmail(SENDER_EMAIL, to_email, msg.as_string())
-        return True
-    except Exception as e:
-        st.error(f"❌ Failed to send email: {e}")
-        return False
-
-
-# ===============================
-# AI UTILITIES
-# ===============================
-def generate_ai_response(prompt, system_message, max_tokens=200, temperature=0.7):
+def analyze_sentiment(text):
     try:
         response = client_ai.chat.completions.create(
-            model="gpt-4o",
+            model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": prompt},
+                {"role": "system", "content": "Classify this email as positive, negative, or neutral."},
+                {"role": "user", "content": text},
             ],
-            max_tokens=max_tokens,
-            temperature=temperature,
         )
-        return response.choices[0].message.content.strip()
-    except Exception as e:
-        st.error(f"OpenAI API Error: {e}")
-        return None
+        return response.choices[0].message.content.strip().lower()
+    except Exception:
+        return "neutral"
 
 
-def analyze_sentiment(email_body):
-    system_message = """
-Classify the sentiment of this email as one of:
-positive → shows interest
-negative → rejects or not interested
-neutral → polite but no intent
-unknown → unclear or irrelevant
-Reply with only one word: positive, negative, neutral, or unknown.
+def generate_followup_email(name):
+    subject = f"Following up on our previous message, {name}"
+    body = f"""
+Hi {name},
+
+Just checking in to see if you had a chance to look at our earlier email.
+Would love to hear your thoughts and explore how Morphius AI can help automate your outreach and workflows.
+
+Best,  
+Morphius AI Team
 """
-    result = generate_ai_response(email_body, system_message, max_tokens=20, temperature=0.2)
-    result = (result or "").lower().strip()
-    return result if result in ["positive", "negative", "neutral", "unknown"] else "unknown"
+    return subject, body
 
 
-# ===============================
-# EMAIL GENERATION
-# ===============================
 def generate_meeting_link_reply(name):
-    subject = "Let's Schedule a Chat – Morphius AI"
-    body = f"""Great to hear from you, {name}!
+    subject = f"Let's schedule a quick chat, {name}"
+    body = f"""
+Hi {name},
 
-I'd love to connect and discuss how Morphius AI can help.
-Please pick a time that works best for you here:
+Great to hear that you're interested!  
+You can book a time directly on our calendar here 👇  
 {SCHEDULING_LINK}
 
-Looking forward to our conversation!
-
-Best regards,  
-Gowthami  
-Morphius AI"""
+Looking forward to connecting soon!  
+Best,  
+Morphius AI Team
+"""
     return subject, body
 
 
 def generate_alternative_offer_reply(name):
-    subject = "Other Solutions from Morphius AI"
-    body = f"""Hi {name},
+    subject = f"Thank you for your response, {name}"
+    body = f"""
+Hi {name},
 
-Thanks for your time and honesty.
+Thank you for getting back to us.  
+No worries — we appreciate your time. If you'd ever like to revisit AI-driven email automation or lead generation, Morphius AI will be here.
 
-Even if our initial proposal wasn't a fit, Morphius AI also offers:
-- Workflow automation  
-- AI-powered chatbots  
-- Real-time analytics dashboards  
-
-Would you be open to exploring one of these areas?
-
-Best regards,  
-Gowthami  
-Morphius AI"""
-    return subject, body
-
-
-def generate_follow_up_email(name, previous_subject, count):
-    subject = f"Following Up: {previous_subject}"
-    body = f"""Hi {name},
-
-Just checking in regarding my previous email about '{previous_subject}'.
-I'd love to show how Morphius AI can streamline your business processes.
-
-If you're free, please book a time here:
-{SCHEDULING_LINK}
-
+Wishing you continued success!  
 Best,  
-Gowthami  
-Morphius AI"""
+Morphius AI Team
+"""
     return subject, body
 
 
-# ===============================
-# MAIN APP
-# ===============================
-def main():
-    st.set_page_config(page_title="Email Reply & Follow-Up Automation", page_icon="📧", layout="wide")
-    st.title("📧 Morphius AI - Handle Replies & Follow-ups")
+def add_to_unsubscribe_list(db, email, reason="User requested unsubscribe"):
+    db["unsubscribe_list"].update_one(
+        {"email": email},
+        {"$set": {"unsubscribed_at": datetime.now(), "reason": reason}},
+        upsert=True,
+    )
 
-    client, db = get_db_connection()
-    if not client:
-        return
-    setup_db_indexes(db)
 
-    st.header("1️⃣ Pending Follow-ups")
-    sent_emails_cursor = db[EMAIL_LOGS_COLLECTION].aggregate([
-        {"$match": {"event_type": {"$in": ["initial_outreach", "follow_up_sent"]}}},
-        {"$group": {
-            "_id": "$recipient_email",
-            "last_sent_subject": {"$last": "$subject"},
-            "last_sent_timestamp": {"$last": "$timestamp"},
-            "follow_up_count": {"$sum": {"$cond": [{"$eq": ["$event_type", "follow_up_sent"]}, 1, 0]}}
-        }}
-    ])
+def get_contacts_for_followup(db):
+    pipeline = [
+        {
+            "$lookup": {
+                "from": EMAIL_LOGS_COLLECTION,
+                "localField": "work_emails",
+                "foreignField": "recipient_email",
+                "as": "email_logs",
+            }
+        },
+        {
+            "$match": {
+                "$and": [
+                    {"email_logs.event_type": {"$ne": "replied_positive"}},
+                    {"email_logs.event_type": {"$ne": "auto_unsubscribe_from_reply"}},
+                ]
+            }
+        },
+    ]
+    contacts = list(db[CLEANED_CONTACTS_COLLECTION].aggregate(pipeline))
+    return pd.DataFrame(contacts)
 
-    sent_df = pd.DataFrame(list(sent_emails_cursor))
-    if sent_df.empty:
-        st.info("No sent emails found.")
+
+# ======================================
+# AUTOMATED REPLY + FOLLOW-UP PROCESS
+# ======================================
+def process_replies_and_followups():
+    db = connect_mongo()
+    now = datetime.now()
+    processed_replies = 0
+    sent_followups = 0
+
+    st.title("🤖 Morphius AI – Automated Replies & Follow-ups")
+
+    # ===============================
+    # STEP 1: Handle Incoming Replies
+    # ===============================
+    replied_cursor = db[EMAIL_LOGS_COLLECTION].find(
+        {"event_type": {"$regex": "^replied_"}, "auto_processed": {"$ne": True}}
+    )
+    replied_df = pd.DataFrame(list(replied_cursor))
+
+    if not replied_df.empty:
+        st.subheader("📨 Processing New Replies...")
+        for _, reply in replied_df.iterrows():
+            email = reply["recipient_email"]
+            body = reply.get("body", "")
+            sentiment = analyze_sentiment(body)
+            name = "there"
+
+            contact = db[CLEANED_CONTACTS_COLLECTION].find_one(
+                {"$or": [{"work_emails": email}, {"personal_emails": email}]}
+            )
+            if contact and contact.get("name"):
+                name = contact["name"].split(" ")[0]
+
+            if "unsubscribe" in body.lower() or "remove me" in body.lower():
+                add_to_unsubscribe_list(db, email, "User replied with unsubscribe request")
+                log_event_to_db(db, "auto_unsubscribe_from_reply", email, "N/A", body, "success")
+                st.warning(f"🚫 {email} unsubscribed.")
+            elif sentiment == "positive":
+                subject, auto_body = generate_meeting_link_reply(name)
+                send_email_smtp_direct(email, subject, add_footer(auto_body))
+                log_event_to_db(db, "auto_reply_positive", email, subject, auto_body, "success")
+                st.success(f"✅ Meeting link sent to {email}")
+            elif sentiment == "negative":
+                subject, auto_body = generate_alternative_offer_reply(name)
+                send_email_smtp_direct(email, subject, add_footer(auto_body))
+                log_event_to_db(db, "auto_reply_negative", email, subject, auto_body, "success")
+                st.warning(f"⚠️ Polite decline message sent to {email}")
+            else:
+                st.info(f"ℹ️ Skipped {email} (neutral sentiment)")
+
+            db[EMAIL_LOGS_COLLECTION].update_one(
+                {"_id": reply["_id"]}, {"$set": {"auto_processed": True}}
+            )
+            processed_replies += 1
     else:
-        now = datetime.datetime.now(datetime.timezone.utc)
-        actions = []
-        for _, row in sent_df.iterrows():
-            email = row["_id"]
-            if is_unsubscribed(db, email):
-                continue
-            ts = row["last_sent_timestamp"]
-            if not isinstance(ts, datetime.datetime):
-                continue
+        st.info("📭 No new replies found.")
+
+    # ===============================
+    # STEP 2: Send Follow-ups Automatically
+    # ===============================
+    st.markdown("---")
+    st.subheader("📧 Sending Follow-ups Automatically...")
+
+    no_reply_contacts = get_contacts_for_followup(db)
+    if not no_reply_contacts.empty:
+        for _, contact in no_reply_contacts.iterrows():
+            ts = contact.get("timestamp", now)
+            try:
+                ts = pd.to_datetime(ts)
+            except Exception:
+                ts = now
+
             if (now - ts).total_seconds() / 60 >= FOLLOW_UP_GRACE_PERIOD_MINUTES:
-                if row["follow_up_count"] < MAX_FOLLOW_UPS_BEFORE_UNSUBSCRIBE:
-                    actions.append({
-                        "email": email,
-                        "next_action": "send_follow_up",
-                        "follow_up_no": row["follow_up_count"] + 1,
-                        "subject": row["last_sent_subject"]
-                    })
-                else:
-                    actions.append({
-                        "email": email,
-                        "next_action": "unsubscribe",
-                        "reason": "Max follow-ups reached"
-                    })
-        if actions:
-            st.table(pd.DataFrame(actions))
-            if st.button("Process Follow-ups"):
-                for a in actions:
-                    if a["next_action"] == "send_follow_up":
-                        subject, body = generate_follow_up_email("there", a["subject"], a["follow_up_no"])
-                        if send_email_smtp_direct(a["email"], subject, body):
-                            log_event_to_db(db, "follow_up_sent", a["email"], subject, body, "success", follow_up_no=a["follow_up_no"])
-                            st.success(f"✅ Sent follow-up to {a['email']}")
-                    else:
-                        add_to_unsubscribe_list(db, a["email"], a["reason"])
-                        log_event_to_db(db, "auto_unsubscribe", a["email"], "N/A", a["reason"], "success")
-                        st.warning(f"🚫 Unsubscribed {a['email']}")
-                st.experimental_rerun()
-        else:
-            st.info("No pending follow-ups right now.")
-
-    # ===========================
-    # HANDLE REPLIES
-    # ===========================
-    st.header("2️⃣ Handle Incoming Replies")
-    replies = list(db[EMAIL_LOGS_COLLECTION].find({
-        "event_type": {"$regex": "^replied_"},
-        "auto_processed": {"$ne": True}
-    }))
-    if not replies:
-        st.info("No new replies for auto-processing.")
-    else:
-        df = pd.DataFrame(replies)[["recipient_email", "event_type", "body", "timestamp"]]
-        st.dataframe(df, use_container_width=True)
-        if st.button("Process Replies"):
-            for r in replies:
-                email = r["recipient_email"]
-                text = r.get("body", "")
-                sentiment = analyze_sentiment(text)
-                contact = db[CLEANED_CONTACTS_COLLECTION].find_one(
-                    {"$or": [{"work_emails": email}, {"personal_emails": email}]}
+                email = (
+                    contact.get("work_emails")
+                    or contact.get("personal_emails")
+                    or None
                 )
-                name = (contact.get("name", "there") if contact else "there").split(" ")[0]
+                if not email:
+                    continue
 
-                if "unsubscribe" in text.lower():
-                    add_to_unsubscribe_list(db, email, "User replied unsubscribe")
-                    log_event_to_db(db, "auto_unsubscribe_from_reply", email, "N/A", text, "success")
-                    st.warning(f"🚫 {email} unsubscribed manually.")
-                elif sentiment == "positive":
-                    subject, body = generate_meeting_link_reply(name)
-                    send_email_smtp_direct(email, subject, body)
-                    log_event_to_db(db, "auto_reply_positive", email, subject, body, "success")
-                    st.success(f"✅ Sent meeting link to {email}")
-                elif sentiment == "negative":
-                    subject, body = generate_alternative_offer_reply(name)
-                    send_email_smtp_direct(email, subject, body)
-                    log_event_to_db(db, "auto_reply_negative", email, subject, body, "success")
-                    st.warning(f"⚠️ Sent alternative offer to {email}")
-                else:
-                    log_event_to_db(db, "auto_skip_neutral", email, "N/A", text, "skipped")
-                    st.info(f"ℹ️ No action for {email} (sentiment: {sentiment})")
+                subject, body = generate_followup_email(contact["name"])
+                body = add_footer(body)
+                send_email_smtp_direct(email, subject, body)
+                log_event_to_db(db, "followup_sent", email, subject, body, "success")
+                sent_followups += 1
 
-                db[EMAIL_LOGS_COLLECTION].update_one({"_id": r["_id"]}, {"$set": {"auto_processed": True}})
-            st.success("✅ Replies processed successfully!")
-            st.experimental_rerun()
+        st.success(f"✅ Sent {sent_followups} follow-ups successfully.")
+    else:
+        st.info("🎉 Everyone has replied or unsubscribed.")
 
-    client.close()
+    # ===============================
+    # FINAL SUMMARY
+    # ===============================
+    st.markdown("---")
+    st.write(f"**Replies Processed:** {processed_replies}")
+    st.write(f"**Follow-ups Sent:** {sent_followups}")
+    st.success("✅ Morphius AI automation completed!")
 
 
+# ======================================
+# RUN APP
+# ======================================
 if __name__ == "__main__":
-    main()
+    process_replies_and_followups()
