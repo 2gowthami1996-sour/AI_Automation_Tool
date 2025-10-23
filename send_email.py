@@ -62,20 +62,19 @@ def append_unsubscribe_link(body_text, recipient_email):
     return body_text.strip() + unsubscribe_link
 
 # ===============================
-# PROFESSIONAL HEADER & SIGNATURE
+# FOOTER WITH SIGNATURE & OFFICE INFO
 # ===============================
-def get_email_header():
+def get_email_footer():
     return """\
-🏢 8th Floor, SS Tech Park, Survey NO126, Gachibowli, Hyderabad, Telangana 500032 | 📧 hello@morphius.in | 📞 +91 7981809795
----
-"""
 
-def get_signature():
-    return """
 Best regards,
 Gowthami
 Employee, Morphius AI
 https://www.morphius.in/
+
+🏢 8th Floor, SS Tech Park, Survey NO126, Gachibowli, Hyderabad, Telangana 500032
+📧 hello@morphius.in
+📞 +91 7981809795
 """
 
 # ===============================
@@ -103,8 +102,7 @@ def decode_prompt_to_domain(prompt):
         return None
 
 def get_fallback_template(domain, name, email=""):
-    header = get_email_header()
-    greeting = f"Hi {name}," if pd.notna(name) and name.strip() else "Dear Sir/Madam,"
+    greeting = "Dear Sir/Madam,"
     
     if "edtech" in str(domain).lower():
         body = f"I came across your profile in the EdTech space. At Morphius AI, we personalize learning and improve educational outcomes.\n\nI would be keen to connect and share insights."
@@ -115,22 +113,17 @@ def get_fallback_template(domain, name, email=""):
     else:
         body = f"I came across your profile and was interested in your work in the {domain} sector. Morphius AI builds AI solutions across industries.\n\nI would be delighted to connect."
     
-    final_body = f"{header}{greeting}\n\n{body}{get_signature()}"
+    final_body = f"{greeting}\n\n{body}{get_email_footer()}"
     return append_unsubscribe_link(final_body, email)
 
 def generate_personalized_email_body(contact_details):
-    name = contact_details.get('name')
-    domain = contact_details.get('domain', 'their industry')
-    linkedin = contact_details.get('linkedin_url', '')
     email = contact_details.get('work_emails') or contact_details.get('personal_emails', '')
-    
-    header = get_email_header()
-    greeting = f"Hi {name}," if pd.notna(name) and name.strip() else "Dear Sir/Madam,"
+    greeting = "Dear Sir/Madam,"
     
     try:
         prompt = f"""
-        Write a professional outreach email for {name} in the {domain} sector. LinkedIn: {linkedin}.
-        Start with: "{header}{greeting}" and end with "{get_signature()}".
+        Write a professional outreach email in the {contact_details.get('domain','industry')} sector.
+        Start with '{greeting}' and end with the footer.
         """
         response = client_ai.chat.completions.create(
             model="gpt-4o",
@@ -143,9 +136,10 @@ def generate_personalized_email_body(contact_details):
         body = response.choices[0].message.content.strip()
     except Exception as e:
         st.warning(f"⚠ OpenAI API failed. Using fallback template. (Error: {e})")
-        body = get_fallback_template(domain, name, email)
+        body = get_fallback_template(contact_details.get('domain','general'), contact_details.get('name',''), email)
 
-    return append_unsubscribe_link(body, email)
+    final_body = f"{greeting}\n\n{body}{get_email_footer()}"
+    return append_unsubscribe_link(final_body, email)
 
 # ===============================
 # MAIN STREAMLIT APP
@@ -249,7 +243,7 @@ def main():
                         st.rerun()
                 with b_col2:
                     if st.button("✍ Clear & Write Manually", key=f"clear_{unique_id}_{regen_count}"):
-                        manual_template = f"{get_email_header()}Hi {email_draft.get('name', '')},\n\n\n\n{get_signature()}"
+                        manual_template = f"Dear Sir/Madam,\n\n\n\n{get_email_footer()}"
                         manual_template = append_unsubscribe_link(manual_template, email_draft['to_email'])
                         st.session_state.edited_emails[i]['body'] = manual_template
                         st.session_state.edited_emails[i]['regen_counter'] += 1
