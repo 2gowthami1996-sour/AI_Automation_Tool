@@ -6,7 +6,6 @@ from io import StringIO
 from openai import OpenAI
 import os
 from dotenv import load_dotenv
-from urllib.parse import quote
 
 # ===============================
 # LOAD CONFIG
@@ -14,11 +13,11 @@ from urllib.parse import quote
 load_dotenv()
 MONGO_URI = os.getenv("MONGO_URI")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME")
-client_ai = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+client_ai = OpenAI(api_key=OPENAI_API_KEY)
 
 # ===============================
-# HELPERS & CALLBACKS
+# HELPERS
 # ===============================
 def get_db_connection():
     try:
@@ -29,7 +28,6 @@ def get_db_connection():
     except ConnectionFailure as e:
         st.error(f"❌ Database Connection Error: {e}")
         return None, None
-
 
 def fetch_cleaned_contacts(db):
     try:
@@ -42,219 +40,112 @@ def fetch_cleaned_contacts(db):
         st.warning(f"⚠ Could not fetch contacts. Error: {e}")
         return pd.DataFrame()
 
-
-def update_subject(index, email_id):
-    for i, email_draft in enumerate(st.session_state.edited_emails):
-        if email_draft['id'] == email_id:
-            widget_key = f"subject_{email_id}_{email_draft['regen_counter']}"
-            st.session_state.edited_emails[i]['subject'] = st.session_state[widget_key]
-            break
-
-
-def update_body(index, email_id):
-    for i, email_draft in enumerate(st.session_state.edited_emails):
-        if email_draft['id'] == email_id:
-            widget_key = f"body_{email_id}_{email_draft['regen_counter']}"
-            st.session_state.edited_emails[i]['body'] = st.session_state[widget_key]
-            break
-
-
 # ===============================
-# UNSUBSCRIBE HELPER
+# UNSUBSCRIBE LINK HELPER
 # ===============================
-def append_unsubscribe_link(body_text, recipient_email):
+def append_unsubscribe_link(body_html, recipient_email):
     unsubscribe_html = f"""
-<br><br>
-If you'd like to unsubscribe and stop receiving these emails, 
-<a href="https://www.morphius.in/unsubscribe?email={recipient_email}">click here</a>.
+<p>If you'd like to unsubscribe and stop receiving these emails, 
+<a href="https://www.morphius.in/unsubscribe?email={recipient_email}">click here</a>.</p>
 """
-    return body_text.strip() + unsubscribe_html
+    return body_html.strip() + unsubscribe_html
 
 # ===============================
-# AI-POWERED LOGIC
+# EMAIL BODY GENERATION
 # ===============================
-def decode_prompt_to_domain(prompt):
-    try:
-        system_message = """
-        You are an expert business analyst. Respond with ONLY a lowercase keyword for the domain.
-        If uncertain, respond with 'general'.
-        """
-        response = client_ai.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": system_message},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=10,
-            temperature=0.1,
-        )
-        domain = response.choices[0].message.content.strip().lower()
-        return domain
-    except Exception as e:
-        st.error(f"OpenAI API Error: {e}")
-        return None
-
-
-def get_fallback_template(domain, name, email=""):
-    greeting =  "Dear Sir/Madam,"
-    signature = "\n\nBest regards,\nGowthami\nEmployee, Morphius AI\nhttps://www.morphius.in/"
-    if "edtech" in str(domain).lower():
-        body = f"I came across your profile in the EdTech space. At Morphius AI, we personalize learning and improve educational outcomes.\n\nI would be keen to connect and share insights."
-    elif "commerce" in str(domain).lower():
-        body = f"I noticed your experience in e-commerce. Morphius AI creates AI-driven tools that enhance customer engagement and optimize online retail.\n\nA brief chat about industry trends could be mutually beneficial."
-    elif "health" in str(domain).lower():
-        body = f"Your work in healthcare is impressive. At Morphius AI, we leverage AI to streamline diagnostics and improve patient care pathways.\n\nI would value a discussion on healthcare technology."
-    else:
-        body = f"I came across your profile and was interested in your work in the {domain} sector. Morphius AI builds AI solutions across industries.\n\nI would be delighted to connect."
-    
-    final_body = f"{greeting}\n\n{body}{signature}"
-    return append_unsubscribe_link(final_body, email)
-
-
 def generate_personalized_email_body(contact_details):
-    name = contact_details.get('name')
-    domain = contact_details.get('domain', 'their industry')
-    linkedin = contact_details.get('linkedin_url', '')
-    email = contact_details.get('work_emails') or contact_details.get('personal_emails', '')
-    greeting = "Dear Sir/Madam,"
-    signature = "\n\nBest regards,\nGowthami\nEmployee, Morphius AI\nhttps://www.morphius.in/"
-    try:
-        prompt = f"""
-        Write a professional outreach email for {name} in the {domain} sector. LinkedIn: {linkedin}.
-        Start with: "{greeting}" and end with "{signature}".
-        """
-        response = client_ai.chat.completions.create(
-            model="gpt-4o",
-            messages=[
-                {"role": "system", "content": "You are a business development assistant. Only output the email body."},
-                {"role": "user", "content": prompt}
-            ],
-            max_tokens=300, temperature=0.75,
-        )
-        body = response.choices[0].message.content.strip()
-    except Exception as e:
-        st.warning(f"⚠ OpenAI API failed. Using fallback template. (Error: {e})")
-        body = get_fallback_template(domain, name, email)
+    name = contact_details.get('name', 'Sir/Madam')
+    domain = contact_details.get('domain', 'their sector')
+    email = (contact_details.get('work_emails') or contact_details.get('personal_emails') or '')
 
-    # Append unsubscribe link
-    return append_unsubscribe_link(body, email)
+    # HTML email components
+    greeting = f"<p>Dear {name},</p>"
+    body_text = f"""
+<p>I hope this message finds you well. My name is G Gowthami, and I am reaching out on behalf of Morphius AI, 
+where we specialize in delivering cutting-edge AI solutions to enhance operational efficiency and innovation.</p>
 
+<p>We understand the unique challenges in the {domain} sector and would love to explore potential collaboration opportunities.</p>
+"""
+    signature = f"""
+<p>Best regards,<br>
+Gowthami<br>
+Employee, Morphius AI<br>
+<a href="https://www.morphius.in/">https://www.morphius.in/</a></p>
+"""
+
+    full_body = greeting + body_text + signature
+    return append_unsubscribe_link(full_body, email)
 
 # ===============================
-# MAIN STREAMLIT APP
+# STREAMLIT APP
 # ===============================
 def main():
-    st.title("📧 Morphius AI: Generate & Edit Email Drafts")
+    st.set_page_config(page_title="Morphius AI: Email Generator", layout="wide")
+    st.title("📧 Morphius AI: Generate & Edit HTML Email Drafts")
 
     if 'edited_emails' not in st.session_state:
         st.session_state.edited_emails = []
-    if 'filter_domain' not in st.session_state:
-        st.session_state.filter_domain = None
 
     client_mongo, db = get_db_connection()
     if not client_mongo:
         return
 
-    st.header("Step 1: Filter Contacts by Prompt")
-    prompt = st.text_input("Enter a prompt (e.g., 'top 10 colleges', 'e-commerce startups')", key="prompt_input")
-    col1, col2 = st.columns(2)
-    with col1:
-        if st.button("🔍 Filter Contacts"):
-            if prompt:
-                domain = decode_prompt_to_domain(prompt)
-                if domain and domain != 'general':
-                    st.session_state.filter_domain = domain
-                    st.success(f"Filtered contacts for domain: *{domain}*")
-                else:
-                    st.session_state.filter_domain = None
-                    st.info("Prompt too general; showing all contacts.")
-                st.rerun()
-            else:
-                st.warning("Please enter a prompt first.")
-    with col2:
-        if st.button("🔄 Show All Contacts"):
-            st.session_state.filter_domain = None
-            st.rerun()
-
-    st.header("Step 2: Select Contacts & Generate Drafts")
+    # Step 1: Load contacts
     contacts_df = fetch_cleaned_contacts(db)
     client_mongo.close()
     if contacts_df.empty:
         st.info("No contacts found.")
         return
 
-    display_df = contacts_df.copy()
-    if st.session_state.filter_domain:
-        display_df = contacts_df[contacts_df['domain'].str.contains(st.session_state.filter_domain, case=False, na=False)].copy()
-        st.info(f"Showing {len(display_df)} contacts matching domain '{st.session_state.filter_domain}'")
-
-    if 'Select' not in display_df.columns:
-        display_df.insert(0, "Select", False)
+    st.header("Step 1: Select Contacts")
+    if 'Select' not in contacts_df.columns:
+        contacts_df.insert(0, "Select", False)
 
     select_all = st.checkbox("Select All Contacts", value=False)
     if select_all:
-        display_df['Select'] = True
+        contacts_df['Select'] = True
 
-    edited_df = st.data_editor(display_df, hide_index=True, disabled=list(display_df.columns.drop("Select")), key="data_editor")
+    edited_df = st.data_editor(contacts_df, hide_index=True, disabled=list(contacts_df.columns.drop("Select")), key="data_editor")
     selected_rows = edited_df[edited_df['Select']]
 
+    # Step 2: Generate drafts
     if st.button(f"Generate Drafts for {len(selected_rows)} Selected Contacts", disabled=selected_rows.empty):
         st.session_state.edited_emails = []
         for i, row in selected_rows.iterrows():
             to_email = None
-            work_email_val = row.get('work_emails')
-            if isinstance(work_email_val, str) and work_email_val.strip():
-                to_email = work_email_val.split(',')[0].strip()
-            if not to_email:
-                personal_email_val = row.get('personal_emails')
-                if isinstance(personal_email_val, str) and personal_email_val.strip():
-                    to_email = personal_email_val.split(',')[0].strip()
-            if not to_email:
-                st.warning(f"⚠️ Skipped '{row.get('name', 'Unknown')}' - no valid email.")
+            if isinstance(row.get('work_emails'), str) and row['work_emails'].strip():
+                to_email = row['work_emails'].split(',')[0].strip()
+            elif isinstance(row.get('personal_emails'), str) and row['personal_emails'].strip():
+                to_email = row['personal_emails'].split(',')[0].strip()
+            else:
+                st.warning(f"⚠ Skipped '{row.get('name', 'Unknown')}' - no valid email.")
                 continue
-            body = generate_personalized_email_body(row)
+
+            body_html = generate_personalized_email_body(row)
             st.session_state.edited_emails.append({
-                "id": i, "name": row['name'], "to_email": to_email,
-                "subject": "Connecting from Morphius AI", "body": body,
-                "contact_details": row.to_dict(),
-                "regen_counter": 0
+                "id": i,
+                "name": row['name'],
+                "to_email": to_email,
+                "subject": "Connecting from Morphius AI",
+                "body": body_html,
+                "contact_details": row.to_dict()
             })
-        st.rerun()
+        st.success(f"✅ Generated {len(st.session_state.edited_emails)} email drafts.")
 
+    # Step 3: Review drafts
     if st.session_state.edited_emails:
-        st.header("Step 3: Review & Edit Drafts")
+        st.header("Step 3: Review & Download Drafts")
         for i, email_draft in enumerate(st.session_state.edited_emails):
-            unique_id = email_draft['id']
-            regen_count = email_draft['regen_counter']
             with st.expander(f"Draft for {email_draft['name']} <{email_draft['to_email']}>", expanded=True):
-                st.text_input("Subject", value=email_draft['subject'],
-                              key=f"subject_{unique_id}_{regen_count}", on_change=update_subject, args=(i, unique_id))
-                st.text_area("Body", value=email_draft['body'], height=250,
-                             key=f"body_{unique_id}_{regen_count}", on_change=update_body, args=(i, unique_id))
-                
-                b_col1, b_col2 = st.columns(2)
-                with b_col1:
-                    if st.button("🔄 Regenerate Body", key=f"regen_{unique_id}_{regen_count}"):
-                        new_body = generate_personalized_email_body(email_draft['contact_details'])
-                        st.session_state.edited_emails[i]['body'] = new_body
-                        st.session_state.edited_emails[i]['regen_counter'] += 1
-                        st.toast(f"Generated a new draft for {email_draft['name']}!")
-                        st.rerun()
-                with b_col2:
-                    if st.button("✍ Clear & Write Manually", key=f"clear_{unique_id}_{regen_count}"):
-                        manual_template = f"Hi {email_draft.get('name', '')},\n\n\n\nBest regards,\nAasrith\nEmployee, Morphius AI\nhttps://www.morphius.in/"
-                        manual_template = append_unsubscribe_link(manual_template, email_draft['to_email'])
-                        st.session_state.edited_emails[i]['body'] = manual_template
-                        st.session_state.edited_emails[i]['regen_counter'] += 1
-                        st.toast(f"Cleared draft for {email_draft['name']}.")
-                        st.rerun()
+                st.text_input("Subject", value=email_draft['subject'], key=f"subject_{i}")
+                st.text_area("Body (HTML)", value=email_draft['body'], height=250, key=f"body_{i}")
 
-        st.markdown("### 📥 Download All Drafts")
+        # Download as CSV
         df_export = pd.DataFrame(st.session_state.edited_emails)[["name", "to_email", "subject", "body"]]
         csv_buffer = StringIO()
         df_export.to_csv(csv_buffer, index=False)
-        st.download_button("⬇ Download Drafts as CSV", data=csv_buffer.getvalue(), file_name="morphius_email_drafts.csv", mime="text/csv", use_container_width=True)
-
+        st.download_button("⬇ Download Drafts as CSV", data=csv_buffer.getvalue(),
+                           file_name="morphius_email_drafts.csv", mime="text/csv", use_container_width=True)
 
 if __name__ == "__main__":
     main()
