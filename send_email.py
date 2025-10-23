@@ -66,9 +66,10 @@ def append_unsubscribe_link(body_text, recipient_email):
     unsubscribe_link = (
         f"\n\n---\nIf you prefer not to receive future emails, "
         f"you can unsubscribe here: "
-        f"https://aiautomationtool-9criyayngv3srzouygnaiy.streamlit.app/unsubscribe?email={quote(recipient_email)}"
+        f"https://https://www.morphius.in/unsubscribe?email={quote(recipient_email)}"
     )
     return body_text.strip() + unsubscribe_link
+
 
 
 
