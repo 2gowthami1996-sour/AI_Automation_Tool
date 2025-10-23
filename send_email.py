@@ -63,9 +63,12 @@ def update_body(index, email_id):
 # UNSUBSCRIBE HELPER
 # ===============================
 def append_unsubscribe_link(body_text, recipient_email):
-    unsubscribe_link = f"\n\n\nIf you prefer not to receive future emails, you can unsubscribe here: https://www.morphius.in/unsubscribe?email={quote(recipient_email)}"
-    return body_text.strip() + unsubscribe_link
-
+    unsubscribe_html = f"""
+<br><br>
+If you'd like to unsubscribe and stop receiving these emails, 
+<a href="https://www.morphius.in/unsubscribe?email={recipient_email}">click here</a>.
+"""
+    return body_text.strip() + unsubscribe_html
 
 # ===============================
 # AI-POWERED LOGIC
