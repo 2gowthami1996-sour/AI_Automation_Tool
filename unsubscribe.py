@@ -1,40 +1,43 @@
-import streamlit as st
+from flask import Flask, request, render_template_string
 from pymongo import MongoClient
-from datetime import datetime
-from urllib.parse import unquote
 import os
 from dotenv import load_dotenv
 
-# ===============================
-# LOAD CONFIG
-# ===============================
 load_dotenv()
+
 MONGO_URI = os.getenv("MONGO_URI")
 MONGO_DB_NAME = os.getenv("MONGO_DB_NAME")
 
-client = MongoClient(MONGO_URI)
-db = client[MONGO_DB_NAME]
-unsubscribe_collection = db["unsubscribe_list"]
+app = Flask(__name__)
 
-# ===============================
-# HANDLE UNSUBSCRIBE REQUEST
-# ===============================
-st.title("🛑 Unsubscribe Confirmation")
+# Connect to MongoDB
+def get_db():
+    client = MongoClient(MONGO_URI)
+    db = client[MONGO_DB_NAME]
+    return db
 
-query_params = st.experimental_get_query_params()
-email_param = query_params.get("email", [None])[0]
+@app.route("/unsubscribe")
+def unsubscribe():
+    email = request.args.get("email")
+    if not email:
+        return render_template_string("<h2>❌ Invalid unsubscribe request.</h2>")
 
-if email_param:
-    email = unquote(email_param)
-    unsubscribe_collection.update_one(
-        {"email": email},
-        {"$set": {
-            "unsubscribed": True,
-            "unsubscribed_at": datetime.utcnow()
-        }},
-        upsert=True
+    db = get_db()
+    # Assuming your contacts are in 'cleaned_contacts' collection
+    result = db.cleaned_contacts.update_many(
+        {"$or":[{"work_emails": email}, {"personal_emails": email}]},
+        {"$set": {"unsubscribed": True}}
     )
-    st.success(f"✅ {email} has been unsubscribed successfully.")
-    st.write("You will no longer receive any further emails from Morphius AI.")
-else:
-    st.error("❌ No email parameter provided in the link.")
+
+    if result.modified_count > 0:
+        message = f"✅ {email} has been unsubscribed successfully!"
+    else:
+        message = f"ℹ️ {email} was not found or already unsubscribed."
+
+    return render_template_string(f"""
+        <h2>{message}</h2>
+        <p>Thank you for updating your preferences.</p>
+    """)
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000)  # Make sure this port is open
