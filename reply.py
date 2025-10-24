@@ -40,7 +40,7 @@ def get_db_connection():
         db = client[MONGO_DB_NAME]
         return client, db
     except ConnectionFailure as e:
-        st.error(f"❌ **Database Connection Error:** {e}")
+        st.error(f"❌ *Database Connection Error:* {e}")
         return None, None
 
 def setup_database_indexes(db):
@@ -101,7 +101,7 @@ def check_interest_with_openai(email_body):
         interest = response.choices[0].message.content.strip().lower().replace(".", "")
         return interest if interest in ["positive", "negative", "neutral"] else "neutral"
     except Exception as e:
-        st.warning(f"⚠️ OpenAI API failed. Falling back to keyword-based analysis. (Error: {e})")
+        st.warning(f"⚠ OpenAI API failed. Falling back to keyword-based analysis. (Error: {e})")
         return check_interest_manually(email_body)
 
 def get_unread_emails():
@@ -181,7 +181,7 @@ def process_follow_ups(db):
         {'$match': {
             '_id': {'$nin': replied_emails},
             'last_contact_time': {'$lt': waiting_period},
-            'outreach_count': {'$lt': 3}
+            'outreach_count': {'$lt': 10}
         }}
     ]
     
@@ -262,10 +262,23 @@ def main():
                 st.write(f"Found {len(unread_emails)} new email(s).")
                 for mail in unread_emails:
                     st.write(f"Processing reply from: {mail['from']}")
-                    log_event_to_db(db, "received", mail["from"], mail["subject"], mail_id=mail["id"], body=mail["body"])
-                    interest = check_interest_with_openai(mail["body"])
-                    st.write(f"-> Interest level: **{interest}**")
-                    send_reply(db, mail["from"], mail["subject"], interest, mail["id"])
+                    
+                    # <<< START OF MODIFICATION >>>
+                    # Check if the sender is a known contact we have emailed before.
+                    is_known_contact = db.email_logs.find_one({"recipient_email": mail['from']})
+
+                    if is_known_contact:
+                        # If they are in the database, process the reply
+                        log_event_to_db(db, "received", mail["from"], mail["subject"], mail_id=mail["id"], body=mail["body"])
+                        interest = check_interest_with_openai(mail["body"])
+                        st.write(f"-> Interest level: *{interest}*")
+                        send_reply(db, mail["from"], mail["subject"], interest, mail["id"])
+                    else:
+                        # If they are NOT in the database, ignore them and mark as read to avoid re-processing
+                        st.warning(f"⚠️ Ignored email from {mail['from']} as they are not a known contact in the database.")
+                        mark_as_read(mail["id"])
+                    # <<< END OF MODIFICATION >>>
+
                 st.success("✅ Finished processing new replies.")
             else:
                 st.write("No new replies to process.")
